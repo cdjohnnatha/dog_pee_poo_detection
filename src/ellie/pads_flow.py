@@ -504,6 +504,10 @@ class PadsMixin:
         visit_id: str | None = None,
         pad_color: str | None = None,
     ) -> str:
+        ring = getattr(self, "ring", None)
+        if ring is not None:  # shadow comparison with the experimental pad cycle (ADR-0026)
+            ring.shadow_pad_change({"at": at, "source": source, "presence_id": presence_id,
+                                    "visit_id": visit_id})  # fmt: skip
         current = self.store.current_pad_change()
         merge = (
             current is not None

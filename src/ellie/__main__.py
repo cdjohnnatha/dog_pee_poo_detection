@@ -13,6 +13,7 @@ from ellie import __version__, frames
 from ellie.analysers.gemini import GeminiAnalyser
 from ellie.evidence import Evidence
 from ellie.ha import COMMAND_TOPICS, FRIGATE_TOPICS, Bridge
+from ellie.ring import ReferenceRing
 from ellie.service import Service
 from ellie.settings import fetch_mqtt_service, load_options
 from ellie.store import Store
@@ -96,6 +97,7 @@ async def main() -> None:
             usd_to_eur=options.usd_to_eur,
             version=__version__,
             watch=PadWatch(utcnow, MEDIA_ROOT / "watch" / "watch.csv"),
+            ring=ReferenceRing(MEDIA_ROOT / "ring") if options.shadow_ring else None,
             download_clip=lambda event_id, visit_id: evidence.download_clip(
                 http, options.frigate_url, event_id, visit_id
             ),

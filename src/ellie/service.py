@@ -13,6 +13,7 @@ import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from ellie import discovery, review_images
@@ -24,6 +25,7 @@ from ellie.evidence import Evidence
 from ellie.frames import FrameError, ReferenceKeeper
 from ellie.pads import PresenceTracker
 from ellie.pads_flow import FOUND_POOP_WINDOW, PadsMixin
+from ellie.ring import ReferenceRing, local_stain
 from ellie.settings import RUNTIME_DEFAULTS, clamp_setting
 from ellie.small_person import SmallPersonFilter
 from ellie.state import build_state, local_text
@@ -144,8 +146,10 @@ class Service(PadsMixin):
         presence: PresenceTracker | None = None,
         watch: PadWatch | None = None,
         fetch_fallback_frame: Callable[[], Awaitable[bytes]] | None = None,
+        ring: ReferenceRing | None = None,
     ) -> None:
         self.watch = watch
+        self.ring = ring  # shadow only (ADR-0026): never feeds counts, decisions or the dashboard
         self._fetch_fallback = fetch_fallback_frame
         self._camera_failing_since: datetime | None = None
         self._watch_day: date | None = None
@@ -260,12 +264,16 @@ class Service(PadsMixin):
                 watching = self.watch is not None and not fallback
                 confirmed = self.watch.observe(crop) if watching else None
                 self.reference.update(crop)
+                if self.ring is not None and not fallback:
+                    self._spawn(self._ring_keep(crop, now, "minute"))
                 if confirmed is not None:  # a change Frigate never reported (ADR-0012)
                     await self._open_watch_visit(confirmed)
                 for visit_id in self.watch.take_cleared() if self.watch is not None else ():
                     await self._clear_poops("watch", visit_id=visit_id)  # the blob is gone
             except (FrameError, OSError) as exc:
                 log.warning("reference refresh failed: %s", exc)
+        elif self.ring is not None and self.ring.due(now):
+            self._spawn(self._ring_capture("busy"))  # the tray is busy: one frame a minute
         for presence_id in self._due_retakes(now):
             self._spawn(self._analyse_presence(presence_id))  # a new after frame, same before
         await self._expire_poops(now)
@@ -1276,6 +1284,10 @@ class Service(PadsMixin):
             }
         self.store.update_visit(visit_id, **fields)
         visit = self.store.get_visit(visit_id)
+        if self.ring is not None:
+            self._spawn(
+                self._ring_visit(visit, analyser.id, result, outcome, before_path, after_path)
+            )
         if outcome in ("pee", "no_pee"):
             await self._census(visit, result)
         await self._pad_full_if_outside(visit)
@@ -1520,6 +1532,62 @@ class Service(PadsMixin):
 
     async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> object:
         return await self._publish_fn(topic, payload, retain)
+
+    # --- reference ring, shadow only (ADR-0026) ---
+
+    def _ring_context(self, now: datetime) -> dict:
+        active = self.tracker.active
+        clear = self.tracker.clear_for(now)
+        present = self.presence.present
+        return {"busy": active is not None or clear < REFERENCE_CLEAR_S or bool(present),
+                "visit": active["id"] if active else None, "person": bool(present),
+                "clear_s": round(clear)}  # fmt: skip
+
+    async def _ring_keep(self, crop: bytes, now: datetime, source: str) -> None:
+        ring = self.ring
+        if ring is None:
+            return
+        await asyncio.to_thread(ring.add, crop, now, source, self._ring_context(now))
+        if source != "followup" and ring.wants_followup(now):
+            await asyncio.sleep(30)  # fast transitions (a pad taken out, the tray put back)
+            await self._ring_capture("followup")
+
+    async def _ring_capture(self, source: str) -> None:
+        """An extra frame for the ring only: go2rtc, no fallback, no alerts, errors swallowed."""
+        if self.ring is None:
+            return
+        now = self._clock()
+        self.ring.last_at = now  # one try per minute even when the camera fails
+        try:
+            crop = self._crop(await self._fetch_frame())
+        except Exception as exc:  # noqa: BLE001 - shadow capture must never hurt the app
+            log.debug("ring (shadow): no %s frame: %r", source, exc)
+            return
+        await self._ring_keep(crop, now, source)
+
+    async def _ring_visit(self, visit: dict, analyser_id: str, result: Any, outcome: str,
+                          before_path: Path, after_path: Path) -> None:  # fmt: skip
+        """One shadow line per decided visit: the current pair, Gemini, the local rule."""
+        ring = self.ring
+        if ring is None:
+            return
+        try:
+            before, after = before_path.read_bytes(), after_path.read_bytes()
+            local = await asyncio.to_thread(local_stain, before, after)
+            ring.shadow_visit({
+                "visit_id": visit["id"], "logged_at": iso(self._clock()),
+                "started_at": visit["started_at"], "ended_at": visit["ended_at"],
+                "frigate": visit["frigate_event_ids"] not in ("", "[]", None),
+                "person_present": bool(visit["person_present"]),
+                "pair": {"before": before_path.name, "after": after_path.name,
+                         "after_mtime": after_path.stat().st_mtime},
+                "gemini": {"analyser": analyser_id, "pee": result.pee,
+                           "confidence": result.pee_confidence, "poop": result.poop,
+                           "pad_replaced": result.pad_replaced},
+                "app_outcome": outcome, "local": local,
+            })  # fmt: skip
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ring (shadow): visit %s not logged: %r", visit.get("id"), exc)
 
     def _spawn(self, coro: Coroutine[Any, Any, Any]) -> None:
         task = asyncio.create_task(coro)

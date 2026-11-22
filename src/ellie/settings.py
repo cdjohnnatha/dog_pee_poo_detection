@@ -46,6 +46,8 @@ class Options(BaseModel):
     camera: str = "ellie"
     log_level: str = "info"
     usd_to_eur: float = 0.9
+    # rolling visual memory of the tray, shadow only (ADR-0026); false turns it off
+    shadow_ring: bool = True
 
     @property
     def analysis_area(self) -> tuple[float, float, float, float]:
