@@ -41,8 +41,11 @@ def folds(rows: list[dict]) -> list[tuple[str, list[int], list[int]]]:
 
 def forward_split(rows: list[dict]) -> tuple[list[int], list[int]]:
     """Time forward: train on <=14/11 pads' period, test on later visits (new pads, new light)."""
-    return ([i for i, r in enumerate(rows) if r["period"] == "tune"],
-            [i for i, r in enumerate(rows) if r["period"] == "later"])  # fmt: skip
+    train = [i for i, r in enumerate(rows) if r["period"] == "tune"]
+    train_pads = {rows[i]["fold_pad"] for i in train}
+    # a pad that straddles the boundary stays on the train side only (no same-pad leakage)
+    test = [i for i, r in enumerate(rows) if r["period"] == "later" and r["fold_pad"] not in train_pads]
+    return train, test
 
 
 def decide(p: float | None) -> str:

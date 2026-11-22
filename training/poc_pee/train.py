@@ -202,7 +202,8 @@ def main() -> None:
     lopo = base | {
         m: {k: common.decide(v) for k, v in d.items()} for (m, s), d in probs.items() if s == "lopo"
     }
-    later = [r for r in rows if r["period"] == "later"]
+    _, fte = common.forward_split(rows)
+    later = [rows[i] for i in fte]
     fwd = {
         m: {k: common.decide(v) for k, v in d.items()}
         for (m, s), d in probs.items()
