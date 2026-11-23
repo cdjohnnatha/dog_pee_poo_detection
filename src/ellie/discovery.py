@@ -113,6 +113,8 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
         "pads_per_month",
         "pads_last_30d",
         "overflow_pees",
+        "avg_overflow_pee",
+        "floor_pees_30d",
     ]
     lo_c, hi_c = RUNTIME_RANGES["confidence_threshold"]
     lo_m, hi_m = RUNTIME_RANGES["merge_gap_s"]
@@ -269,6 +271,24 @@ def _specs(analysers: Sequence[str]) -> list[tuple[str, str, dict[str, Any]]]:
                     **{
                         k: f"value_json.poop_present.{k}"
                         for k in ("count", "since", "visit_id", "where", "image")
+                    }
+                ),
+            },
+        ),
+        (
+            "binary_sensor",
+            "pee_on_floor",
+            {
+                "name": "Xixi no chão",
+                "icon": "mdi:water-alert",
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "value_template": "{{ 'ON' if value_json.floor_pee.on else 'OFF' }}",
+                "json_attributes_topic": STATE_TOPIC,
+                "json_attributes_template": _attrs(
+                    **{
+                        k: f"value_json.floor_pee.{k}"
+                        for k in ("count", "since", "visit_id", "where", "by", "image")
                     }
                 ),
             },

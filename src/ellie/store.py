@@ -160,6 +160,17 @@ MIGRATIONS: list[str] = [
     ALTER TABLE labels ADD COLUMN doubt_reason TEXT
         CHECK (doubt_reason IN ('glare', 'old_stain', 'other'));
     """,
+    # 11: a pee on the floor (2026-11-23, ADR-0029): who said so (the analyser's pee_where or the
+    # owner's "Ela fez xixi no chão") and when the floor was cleaned (owner, pad change, timeout)
+    """
+    ALTER TABLE visits ADD COLUMN pee_where_by TEXT CHECK (pee_where_by IN ('analyser', 'owner'));
+    ALTER TABLE visits ADD COLUMN floor_cleared_at TEXT;
+    ALTER TABLE visits ADD COLUMN floor_cleared_by TEXT
+        CHECK (floor_cleared_by IN ('owner', 'pad_change', 'timeout', 'migration'));
+    UPDATE visits SET pee_where_by = 'analyser' WHERE pee_where IS NOT NULL;
+    UPDATE visits SET floor_cleared_at = COALESCE(ended_at, started_at), floor_cleared_by = 'migration'
+        WHERE pee_where IN ('off_pad', 'both');
+    """,
 ]
 
 # a visit is in the review list for a pee it could not decide, or for a poop it was unsure about
@@ -189,6 +200,9 @@ _VISIT_COLUMNS = (
     "found_by",
     "found_from",
     "poop_walk",
+    "pee_where_by",
+    "floor_cleared_at",
+    "floor_cleared_by",
 )
 _PRESENCE_COLUMNS = (
     "id",
@@ -348,6 +362,14 @@ class Store:
         sql = (
             "SELECT * FROM visits WHERE final_poop = 'poop' AND poop_cleared_at IS NULL"
             " ORDER BY started_at DESC"
+        )
+        return [_visit_from_row(r) for r in self._db.execute(sql)]
+
+    def open_floor_pees(self) -> list[dict]:
+        """Counted pees outside the pad whose floor nobody has cleaned yet, newest first."""
+        sql = (
+            "SELECT * FROM visits WHERE final_outcome = 'pee' AND pee_where IN ('off_pad', 'both')"
+            " AND floor_cleared_at IS NULL ORDER BY started_at DESC"
         )
         return [_visit_from_row(r) for r in self._db.execute(sql)]
 

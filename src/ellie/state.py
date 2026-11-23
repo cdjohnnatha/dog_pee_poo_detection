@@ -51,6 +51,20 @@ def _poop_view(evidence: Evidence, visit: dict | None) -> dict | None:
     }
 
 
+def _floor_view(evidence: Evidence, open_floor: list[dict]) -> dict[str, Any]:
+    """A pee on the floor nobody has cleaned yet (ADR-0029): the dashboard banner."""
+    newest = open_floor[0] if open_floor else None
+    return {
+        "on": newest is not None,
+        "count": len(open_floor),
+        "since": newest["started_at"] if newest else None,
+        "visit_id": newest["id"] if newest else None,
+        "where": newest["pee_where"] if newest else None,
+        "by": newest["pee_where_by"] if newest else None,
+        "image": _url_if_exists(evidence, newest["id"], "after.jpg") if newest else None,
+    }
+
+
 def build_state(
     *,
     store: Store,
@@ -108,6 +122,7 @@ def build_state(
                 for k in ("visit_id", "where", "image")
             },
         },
+        "floor_pee": _floor_view(evidence, store.open_floor_pees()),
         "last_visit": None
         if last_visit is None
         else {

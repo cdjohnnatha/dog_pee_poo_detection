@@ -60,6 +60,8 @@ FOUND_MATCH = timedelta(hours=6)  # a manual pee takes over a found pee of the s
 CAMERA_ALERT_AFTER = timedelta(minutes=15)  # go2rtc failing this long: tell the owner
 ALERT_EVERY_S = 6 * 3600
 POOP_PRESENT_TIMEOUT_H = 12  # a counted poop nobody cleared stops being "present" after this
+FLOOR_PRESENT_TIMEOUT_H = 12  # a pee on the floor nobody cleaned stops being "present" (it dried)
+FLOOR_MARK_WINDOW = timedelta(hours=12)  # "Ela fez xixi no chão" marks the last pee this recent
 POOP_TRACK_LOOKBACK_DAYS = 2  # after a restart, open poops this recent are followed again
 POOP_LABELS = ("poop", "no_poop")
 DURING_OWN = "during_own.jpg"  # own frame while she is there, used when Frigate has no snapshot
@@ -186,6 +188,8 @@ class Service(PadsMixin):
             "pad_undo": self._cmd_pad_undo,
             "poop_clear": self._cmd_poop_clear,
             "manual_poop": self._cmd_manual_poop,
+            "floor_pee": self._cmd_floor_pee,
+            "floor_clear": self._cmd_floor_clear,
         }
         self._tasks: set[asyncio.Task] = set()
         self._alerts_sent: dict[str, datetime] = {}
@@ -277,6 +281,7 @@ class Service(PadsMixin):
         for presence_id in self._due_retakes(now):
             self._spawn(self._analyse_presence(presence_id))  # a new after frame, same before
         await self._expire_poops(now)
+        await self._expire_floor(now)
         Counting(self.store).resolve_overdue_uncertain(now)
         local = now.astimezone(LOCAL_TZ)
         if (local.hour, local.minute) >= (3, 30) and self._last_purge != local.date():
@@ -719,6 +724,63 @@ class Service(PadsMixin):
             seen = datetime.fromisoformat(visit["ended_at"] or visit["started_at"])
             if now - seen >= limit:
                 await self._clear_poops("timeout", visit_id=visit["id"])
+
+    # --- a pee on the floor (ADR-0029) ---
+
+    async def _clear_floor(self, by: str, visit_id: str | None = None) -> int:
+        """The floor was cleaned (`by`: owner, pad_change, timeout): the banner goes away."""
+        stamp, cleared = iso(self._clock()), 0
+        for visit in self.store.open_floor_pees():
+            if visit_id and visit["id"] != visit_id:
+                continue
+            self.store.update_visit(visit["id"], floor_cleared_at=stamp, floor_cleared_by=by)
+            cleared += 1
+        if cleared:
+            log.info("pee on the floor cleaned (%s): %s visit(s)", by, cleared)
+            await self.publish_state()
+        return cleared
+
+    async def _expire_floor(self, now: datetime) -> None:
+        limit = timedelta(hours=FLOOR_PRESENT_TIMEOUT_H)
+        for visit in self.store.open_floor_pees():
+            if now - datetime.fromisoformat(visit["ended_at"] or visit["started_at"]) >= limit:
+                await self._clear_floor("timeout", visit_id=visit["id"])
+
+    async def _cmd_floor_pee(self, data: dict) -> None:
+        """`ellie/cmd/floor_pee`: "Ela fez xixi no chão". Marks the given visit, else the last
+        counted pee of the last FLOOR_MARK_WINDOW; with none, a pee the app missed is added now.
+        The owner's word is kept apart (`pee_where_by = owner`) from the analyser's guess."""
+        visit_id = data.get("visit_id")
+        if visit_id is not None and not isinstance(visit_id, str):
+            log.warning("ignored floor_pee command: bad visit_id")
+            return
+        now = self._clock()
+        if visit_id:
+            visit = self.store.get_visit(visit_id)
+            if visit is None or visit["final_outcome"] != "pee":
+                log.warning("floor_pee: %s is not a counted pee", visit_id)
+                return
+        else:
+            recent = self.store.pees_list_between(iso(now - FLOOR_MARK_WINDOW), None)
+            if not recent:
+                await self._cmd_manual_pee({"at": iso(now), "by": data.get("by")})
+                recent = self.store.pees_list_between(iso(now - FLOOR_MARK_WINDOW), None)
+                if not recent:
+                    return
+            visit = recent[-1]
+        where = "both" if visit["pee_where"] in ("on_pad", "both") else "off_pad"
+        self.store.update_visit(visit["id"], pee_where=where, pee_where_by="owner",
+                                floor_cleared_at=None, floor_cleared_by=None)  # fmt: skip
+        log.info("visit %s: the owner says the pee went on the floor (%s)", visit["id"], where)
+        await self.publish_state()
+
+    async def _cmd_floor_clear(self, data: dict) -> None:
+        """`ellie/cmd/floor_clear`: "Limpei o chão". One visit, or every open one."""
+        visit_id = data.get("visit_id")
+        if visit_id is not None and not isinstance(visit_id, str):
+            log.warning("ignored floor_clear command: bad visit_id")
+            return
+        await self._clear_floor("owner", visit_id=visit_id or None)
 
     async def _cmd_poop_clear(self, data: dict) -> None:
         """`ellie/cmd/poop_clear`: "Limpei". One visit, or every open poop without `visit_id`."""
@@ -1266,12 +1328,16 @@ class Service(PadsMixin):
         fields = {
             "auto_outcome": outcome,
             "pee_where": result.pee_where,
+            "pee_where_by": "analyser" if result.pee_where else None,
             "poop_observed": result.poop,
             "reason": result.reason
             if stain is None
             else (f"{result.reason} (mas {stain:.0%} do tapete tem mancha nova)"),
             "deciding_analyser": analyser.id,
         }
+        if visit_row.get("pee_where_by") == "owner":  # "Ela fez xixi no chão" wins (ADR-0029)
+            fields.pop("pee_where")
+            fields.pop("pee_where_by")
         if not self.store.labels_for(visit_id, "poop"):  # the owner's poop answer wins too
             fields |= self._poop_fields(result) | {"poop_cleared_at": None, "poop_cleared_by": None}
             if fields["auto_poop"] == "no_poop":

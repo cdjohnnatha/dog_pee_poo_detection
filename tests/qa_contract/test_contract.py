@@ -4,7 +4,7 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from hasim import DASH, HA, LISBON, SCRIPTS, Ha, automation, entity_ids_in
+from hasim import DASH, HA, SCRIPTS, Ha, automation, entity_ids_in
 
 from ellie import discovery
 from helpers import FakeClock, build_rig, make_jpeg, make_visit
@@ -116,7 +116,8 @@ async def test_manual_pee_with_datetime_selector_format(rig):
     assert v["started_at"] == "2026-07-10T17:30:00Z"  # 18:30 Lisbon summer
 
 
-async def test_label_from_phone_button_and_dashboard(rig):
+async def test_label_from_dashboard(rig):
+    """The phone buttons were removed with the review notifications (spec 003 ADR-0028)."""
     put_visit(rig, needs_review=True, final_outcome=None, auto_outcome="uncertain")
     await rig.service.publish_state()
     st = ha_from_state(last_state(rig))
@@ -124,17 +125,6 @@ async def test_label_from_phone_button_and_dashboard(rig):
     _, payload = render_payload("ellie_label_current_review", ha, label="pee")
     await rig.service.on_command("label", payload.encode())
     assert rig.store.get_visit("v_20260710_190000")["final_outcome"] == "pee"
-    act = automation("review_action")["actions"][1]["data"]["payload"]
-    ev = {"data": {"action": "ELLIE_PEE_NO::v_20260710_190000", "device_id": "abc"}}
-
-    class Ev(dict):
-        pass
-
-    payload = Ha({}, NOW).render(
-        act, parts=["ELLIE_PEE_NO", "v_20260710_190000"], trigger={"event": ev}
-    )
-    await rig.service.on_command("label", payload.encode())
-    assert rig.store.get_visit("v_20260710_190000")["final_outcome"] == "no_pee"
 
 
 async def test_dashboard_answer_in_doubt_reaches_the_app(rig):
@@ -188,44 +178,19 @@ def _tz(name):
 
 
 @pytest.mark.parametrize("proc_tz", ["UTC"])
-def test_no_pee_alert_time_is_lisbon_even_if_process_tz_is_utc(proc_tz):
+def test_no_poop_alert_time_is_lisbon_even_if_process_tz_is_utc(proc_tz):
     """`astimezone()` without argument uses the OS zone, not HA's configured zone (use as_local)."""
     old = os.environ.get("TZ")
     _tz(proc_tz)
     try:
-        ha = Ha({"sensor.ellie_last_pee": ("2026-07-10T20:30:00+00:00", {})}, NOW)
-        step = automation("no_pee_alert")["actions"][0]["variables"]
+        ha = Ha({"sensor.ellie_last_poop": ("2026-07-10T20:30:00+00:00", {})}, NOW)
+        step = automation("no_poop_alert")["actions"][0]["variables"]
         last = ha.render(step["last"])
 
         msg = ha.env.from_string(
-            automation("no_pee_alert")["actions"][1]["data"]["message"]
+            automation("no_poop_alert")["actions"][1]["data"]["message"]
         ).render(last=ha._as_datetime(last))
-        assert msg == "Último xixi às 21:30."
-    finally:
-        if old is None:
-            os.environ.pop("TZ", None)
-        else:
-            os.environ["TZ"] = old
-        time.tzset()
-
-
-def test_pad_reminder_once_per_day_uses_ha_zone():
-    """last_triggered 23:30 Lisbon-local day 10 (22:30Z) vs now 00:10 Lisbon day 11 -> new day OK;
-    but with a UTC process zone `.astimezone().date()` says day 10 for a 00:10 Lisbon firing
-    (23:10Z day 10) and the next 07:00 is still 'same day' only by luck; assert HA-zone logic."""
-    cond = automation("pad_reminder")["conditions"][2]["value_template"]
-    old = os.environ.get("TZ")
-    _tz("UTC")
-    try:
-        # fired 2026-07-10 23:30 Lisbon = 22:30Z ; now = 2026-07-11 00:10 Lisbon (local day 11)
-        ha = Ha({}, datetime(2026, 7, 11, 0, 10, tzinfo=LISBON))
-        ha.this = {"attributes": {"last_triggered": datetime(2026, 7, 10, 22, 30, tzinfo=UTC)}}
-        # In the owner's zone the reminder fired on day 10 (23:30) -> day 11 allowed.
-        # With process zone UTC the fired date is day 10, now.date() day 11 -> allowed (ok).
-        # Reverse case: fired 2026-07-11 00:30 Lisbon (= 07-10 23:30Z), now 07-11 07:00 Lisbon.
-        ha.this = {"attributes": {"last_triggered": datetime(2026, 7, 10, 23, 30, tzinfo=UTC)}}
-        ha.now = datetime(2026, 7, 11, 7, 0, tzinfo=LISBON)
-        assert ha.render(cond) == "False"  # already reminded today (local), must not repeat
+        assert msg == "Último cocô às 10/07 21:30."
     finally:
         if old is None:
             os.environ.pop("TZ", None)
