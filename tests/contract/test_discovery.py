@@ -41,6 +41,7 @@ IDS = {
     "sensor.ellie_last_poop",
     "sensor.ellie_poop_daily_history",
     "binary_sensor.ellie_poop_present",
+    "binary_sensor.ellie_pee_on_floor",
     "image.ellie_poop_photo",
     "sensor.ellie_poop_hours_since",
     "sensor.ellie_poop_typical_time",
@@ -83,6 +84,15 @@ FULL = {
         "visit_id": "v1",
         "where": "beside_tray",
         "image": "p.jpg",
+    },
+    "floor_pee": {
+        "on": True,
+        "count": 1,
+        "since": "2026-10-29T08:24:00Z",
+        "visit_id": "v2",
+        "where": "off_pad",
+        "by": "owner",
+        "image": "f.jpg",
     },
     "poop_habits": {
         "window_days": 14,
@@ -163,12 +173,23 @@ FULL = {
         "pads_per_month": 12.5,
         "pads_last_30d": 9,
         "overflow_pees": [6],
+        "avg_overflow_pee": 6.0,
+        "floor_pees_30d": 1,
     },
 }
 NULLED = {
     **FULL,
     "last_pee": None,
     "last_poop": None,
+    "floor_pee": {
+        "on": False,
+        "count": 0,
+        "since": None,
+        "visit_id": None,
+        "where": None,
+        "by": None,
+        "image": None,
+    },
     "poop_present": {
         "on": False,
         "count": 0,
@@ -292,6 +313,13 @@ def test_poop_entities_render() -> None:
         "image": "p.jpg",
     }
     assert BY_ID["binary_sensor.ellie_poop_present"]["payload_on"] == "ON"
+    assert val("binary_sensor.ellie_pee_on_floor") == "ON"
+    assert val("binary_sensor.ellie_pee_on_floor", NULLED) == "OFF"
+    floor = json.loads(
+        _render(BY_ID["binary_sensor.ellie_pee_on_floor"]["json_attributes_template"], FULL)
+    )
+    assert floor == {"count": 1, "since": "2026-10-29T08:24:00Z", "visit_id": "v2",
+                     "where": "off_pad", "by": "owner", "image": "f.jpg"}  # fmt: skip
 
 
 def test_poop_habit_entities_render() -> None:

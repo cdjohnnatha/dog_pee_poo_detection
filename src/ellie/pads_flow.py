@@ -96,6 +96,8 @@ class PadsMixin:
                 "days": None,
                 "pees_per_day": None,
                 "overflow_pee": None,
+                "overflow_after_h": None,
+                "floor_pees": None,
             }
             if counted:
                 pees = self.store.pees_list_between(c["at"], newer_at)
@@ -105,10 +107,17 @@ class PadsMixin:
                 ).total_seconds()
                 days /= 86400
                 entry["days"] = round(days, 1)
+                outside = [v for v in pees if v["pee_where"] in ("off_pad", "both")]
+                entry["floor_pees"] = len(outside)
                 entry["overflow_pee"] = next(
                     (n for n, v in enumerate(pees, 1) if v["pee_where"] in ("off_pad", "both")),
                     None,
                 )
+                if outside:  # how long the pad lasted before she started to miss it
+                    first = datetime.fromisoformat(outside[0]["started_at"])
+                    entry["overflow_after_h"] = round(
+                        (first - datetime.fromisoformat(c["at"])).total_seconds() / 3600, 1
+                    )
                 if newer_at:  # finished: the pad's totals are final
                     entry["pees"] = len(pees)
                     entry["pees_per_day"] = round(len(pees) / days, 1) if days >= 0.1 else None
@@ -137,6 +146,12 @@ class PadsMixin:
                 1 for c in self.store.pad_changes_since(since) if c["undone_at"] is None
             ),
             "overflow_pees": overflows,  # first pee outside the pad, per pad that overflowed
+            "avg_overflow_pee": round(sum(overflows) / len(overflows), 1) if overflows else None,
+            "floor_pees_30d": sum(
+                1
+                for v in self.store.pees_list_between(since, None)
+                if v["pee_where"] in ("off_pad", "both")
+            ),
         }
 
     async def _pad_full_if_outside(self, visit: dict) -> None:
@@ -447,6 +462,7 @@ class PadsMixin:
             final_outcome=outcome if decided else None,
             poop_observed=result.poop,
             pee_where=result.pee_where,
+            pee_where_by="analyser" if result.pee_where else None,
             reason=result.reason,
             needs_review=(not decided) or bool(self.cfg["validation_mode"]),
             deciding_analyser=analyser.id,
@@ -504,6 +520,7 @@ class PadsMixin:
         visit_id: str | None = None,
         pad_color: str | None = None,
     ) -> str:
+        await self._clear_floor("pad_change")  # a pad change comes with a clean floor (ADR-0029)
         ring = getattr(self, "ring", None)
         if ring is not None:  # shadow comparison with the experimental pad cycle (ADR-0026)
             ring.shadow_pad_change({"at": at, "source": source, "presence_id": presence_id,

@@ -168,6 +168,9 @@ def make_visit(**overrides: Any) -> dict:
         "found_by": None,
         "found_from": None,
         "poop_walk": False,
+        "pee_where_by": None,
+        "floor_cleared_at": None,
+        "floor_cleared_by": None,
     }
     return {**base, **overrides}
 
