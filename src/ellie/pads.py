@@ -39,6 +39,8 @@ class PresenceTracker:
         self._person = 0
         self._zone_person = 0  # `frigate/tray_area/person`
         self._held: dict[str, datetime] = {}  # big person events in tray_area -> last message
+        # presences during which a REAL person (big box) was at the tray: never Ellie (T152)
+        self.big_seen: set[str] = set()
         self._dog = 0
         self._visit_active = False
         self._clear_since: datetime | None = None
@@ -78,10 +80,18 @@ class PresenceTracker:
             self._last_person, self._clear_since = now, None
             if self._started is None and not self._visit_active:
                 self._started, self._id = now, self._new_id(now)
+                self._mark_big()
                 return [PresenceAction("started", self._row(None))]
+            self._mark_big()
             return []
         self._update_clear(now)
         return []
+
+    def _mark_big(self) -> None:
+        if self._held and self._id is not None:
+            self.big_seen.add(self._id)
+            if len(self.big_seen) > 200:  # memory only; a restart forgets it (old behaviour)
+                self.big_seen = set(sorted(self.big_seen)[-100:])
 
     def on_dog_area(self, count: int, now: datetime) -> list[PresenceAction]:
         """`frigate/tray_area/dog`: a dog around also keeps the area "busy"."""
