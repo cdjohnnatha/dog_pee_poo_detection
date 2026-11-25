@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ellie import discovery, review_images
+from ellie import burst, discovery, review_images
 from ellie.analysers.base import Analyser, AnalyserError
 from ellie.census import FOUND_PEE_REASON, found_pee_times, is_found_pee, missing_pees
 from ellie.counting import LOCAL_TZ, Counting, local_date
@@ -202,6 +202,7 @@ class Service(PadsMixin):
         self._presence_chain: tuple[bytes, datetime] | None = None  # before + end of last presence
         self._census_lock = asyncio.Lock()
         self._person_checks: dict[str, Any] = {}  # visit id -> pad answer for the person after her
+        self._bursts: dict[str, dict[str, Any]] = {}  # visit id -> burst progress (ADR-0031)
 
     # --- MQTT entry points ---
 
@@ -258,6 +259,8 @@ class Service(PadsMixin):
         now = self._clock()
         await self._apply(self.tracker.tick(now))
         await self._apply_presence(self._sync_presence(now) + self.presence.tick(now))
+        if self.ring is not None:
+            self._burst_tick(now)
 
     async def minute_tasks(self) -> None:
         now = self._clock()
@@ -875,6 +878,9 @@ class Service(PadsMixin):
                 self._spawn(self._analyse(visit["id"]))  # first: a store error must not strand it
             if action.kind == "dog_left":
                 self._spawn(self._capture_frame(visit["id"], f"left_{visit['entries']}.jpg"))
+                if self.ring is not None:  # the after burst starts now (ADR-0031, shadow)
+                    b = self._bursts.setdefault(visit["id"], self._new_burst(visit))
+                    b.update(left_at=self._clock(), next_after=0, summarised=False)
                 continue
             if action.kind == "during":
                 self._spawn(self._capture_frame(visit["id"], DURING_OWN))
@@ -1598,6 +1604,82 @@ class Service(PadsMixin):
 
     async def _publish(self, topic: str, payload: str | bytes, retain: bool) -> object:
         return await self._publish_fn(topic, payload, retain)
+
+    # --- bursts around a visit, shadow only (ADR-0031) ---
+
+    def _new_burst(self, visit: dict) -> dict[str, Any]:
+        return {"started": datetime.fromisoformat(visit["started_at"]), "during": 0,
+                "last_during": None, "left_at": None, "next_after": 0, "summarised": False,
+                "busy": False}  # fmt: skip
+
+    def _burst_tick(self, now: datetime) -> None:
+        active = self.tracker.active
+        here = active["id"] if active and active["state"] == "OPEN" else None
+        if here is not None:
+            b = self._bursts.setdefault(here, self._new_burst(active))
+            due = b["last_during"] is None or (
+                (now - b["last_during"]).total_seconds() >= burst.DURING_EVERY_S
+            )
+            if not b["busy"] and b["during"] < burst.DURING_MAX and due:
+                b["during"] += 1
+                b["last_during"] = now
+                b["busy"] = True  # set now, not when the task starts: one frame at a time
+                offset = int((now - b["started"]).total_seconds())
+                self._spawn(self._burst_capture(here, f"d_{offset:03d}.jpg"))
+        offsets = [burst.AFTER_FIRST_S + burst.AFTER_EVERY_S * k
+                   for k in range(int((burst.AFTER_SPAN_S - burst.AFTER_FIRST_S)
+                                      // burst.AFTER_EVERY_S) + 1)]  # fmt: skip
+        for visit_id, b in list(self._bursts.items()):
+            if (now - b["started"]).total_seconds() > 2 * 3600:
+                self._bursts.pop(visit_id)  # a visit that never ended (restart, Frigate gone)
+                continue
+            if b["left_at"] is None or b["busy"] or visit_id == here:
+                continue
+            since = (now - b["left_at"]).total_seconds()
+            if b["next_after"] < len(offsets) and since >= offsets[b["next_after"]]:
+                name = f"a_{int(offsets[b['next_after']]):03d}.jpg"
+                b["next_after"] += 1
+                b["busy"] = True
+                self._spawn(self._burst_capture(visit_id, name))
+            elif b["next_after"] >= len(offsets) and not b["summarised"]:
+                b["summarised"] = True
+                self._spawn(self._burst_summary(visit_id))
+
+    async def _burst_capture(self, visit_id: str, name: str) -> None:
+        """One burst frame: go2rtc only (no fallback, no alerts), reduced, errors swallowed."""
+        b = self._bursts.get(visit_id)
+        try:
+            crop = self._crop(await self._fetch_frame())
+            small = await asyncio.to_thread(burst.reduce, crop)
+            self.evidence.write(self.evidence.visit_dir(visit_id) / "burst" / name, small)
+        except Exception as exc:  # noqa: BLE001 - shadow capture must never hurt the app
+            log.debug("burst (shadow): no %s for %s: %r", name, visit_id, exc)
+        finally:
+            if b is not None:
+                b["busy"] = False
+
+    async def _burst_summary(self, visit_id: str) -> None:
+        directory = self.evidence.visit_dir(visit_id) / "burst"
+        try:
+            frames = [
+                (float(p.stem[2:]), p.read_bytes()) for p in sorted(directory.glob("a_*.jpg"))
+            ]
+            before_path = self.evidence.visit_dir(visit_id) / "before.jpg"
+            before = before_path.read_bytes() if before_path.exists() else None
+            summary = await asyncio.to_thread(burst.summarise, before, frames)
+            summary |= {"visit_id": visit_id,
+                        "during_frames": len(list(directory.glob("d_*.jpg")))}  # fmt: skip
+            await asyncio.to_thread(burst.write_summary, directory, summary)
+            if self.ring is not None:
+                self.ring.shadow_visit({"kind": "burst", **{k: v for k, v in summary.items()
+                                                             if k != "rejected"}})  # fmt: skip
+            log.info("burst (shadow) %s: %s after frames, first quiet at %s s, best %s",
+                     visit_id, summary["after_frames"], summary["first_quiet_s"],
+                     (summary["best"] or {}).get("file"))  # fmt: skip
+        except Exception as exc:  # noqa: BLE001
+            log.warning("burst (shadow): no summary for %s: %r", visit_id, exc)
+        finally:
+            self._bursts.pop(visit_id, None)
 
     # --- reference ring, shadow only (ADR-0026) ---
 
