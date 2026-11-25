@@ -397,7 +397,12 @@ class PadsMixin:
         """
         directory = self.evidence.presence_dir(presence["id"])
         before_path, after_path = directory / "before.jpg", directory / "after.jpg"
-        if before_path.exists() and after_path.exists():
+        if presence["id"] in self.presence.big_seen:
+            # The promotion is for Ellie seen as a "person". A real person (big box) was at the
+            # tray: moved or rotated stains are not a pee (T152, 2026-11-25 09:59, ADR-0030).
+            log.info("presence %s: a real person was at the tray, no pee/poop check",
+                     presence["id"])  # fmt: skip
+        elif before_path.exists() and after_path.exists():
             created: list[str] = []
             try:
                 await self._promote(presence, before_path, after_path, analyser, created)

@@ -28,6 +28,7 @@ NEW_PAD_LIGHTER_MIN = (
 SAME_PAD_LIGHTER_MAX = 0.05
 REMOVED_DARKER_MIN = 0.50  # most pad cells darker than the white pad: floor tiles show (tray away)
 CONFIRM_GAP_S = 120.0
+CYCLE_RESOLVE_S = 45 * 60  # no new pad this long after someone touched the tray: the same pad
 STABLE_PAD_MAX = 0.35  # mean |diff| on the pad between the two frames that confirm a new pad
 IR_SAT = 6.0
 _X1, _Y1, _X2, _Y2 = w.PAD_BOX
@@ -84,7 +85,14 @@ class PadCycle:
     previous: bytes | None = None  # last frame seen: steadiness is frame to frame
     history: list[dict] = field(default_factory=list)
 
-    def observe(self, at: datetime, jpeg: bytes, busy: bool = False) -> dict:
+    def observe(self, at: datetime, jpeg: bytes, busy: bool = False, person: bool = False) -> dict:
+        """`busy`: someone (Ellie or a person) is at the tray; `person`: a person is.
+
+        A pad change needs someone to take the pad out: only after a person at the tray, an empty
+        tray or a removed tray is a lighter pad read as a new one. Until then the reference follows
+        every quiet frame, so light changes and a pad slowly drying are not changes (2026-11-22 to
+        11-25: 24 false confirmations before this rule).
+        """
         f = features(jpeg)
         if self.in_use is None:
             self.in_use, self.in_use_at, self.previous = jpeg, at, jpeg
@@ -93,13 +101,22 @@ class PadCycle:
         step = compare(self.previous, jpeg) if self.previous is not None else c
         self.previous = jpeg
         c["floor_step"] = step["floor_abs"]  # vs the previous frame: wet floor or light that
-        quiet = not busy and step["floor_abs"] <= w.CTRL_MAX  # settled is fine again
+        if person:
+            self._away(at)  # from now on the pad may have been taken out
+        quiet = not busy and not person and step["floor_abs"] <= w.CTRL_MAX
         if f["tex"] <= EMPTY_TEX_MAX:
             self._away(at)
             return self._out(at, "TRAY_EMPTY", f, c, f"smooth tray centre (tex {f['tex']})")
         if not quiet:
             state = "CLEANING" if self.away_since else "UNKNOWN"
             return self._out(at, state, f, c, "someone at the tray or the floor changed")
+        if self.away_since is None:  # nobody touched the tray: light, drying or a pee, not a change
+            self.in_use, self.in_use_at = jpeg, at
+            return self._out(at, "PAD_IN_USE", f, c, "nobody at the tray: the reference follows")
+        if self.pending is None and (at - self.away_since).total_seconds() >= CYCLE_RESOLVE_S:
+            self.in_use, self.in_use_at, self.away_since = jpeg, at, None
+            return self._out(at, "PAD_IN_USE", f, c, "no new pad after the person: the same pad",
+                             event="NO_CHANGE")  # fmt: skip
         if c["darker"] >= REMOVED_DARKER_MIN and c["lighter"] <= SAME_PAD_LIGHTER_MAX:
             self._away(at)
             return self._out(

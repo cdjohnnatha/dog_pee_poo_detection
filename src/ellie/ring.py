@@ -72,7 +72,8 @@ class ReferenceRing:
             small = reduce(crop)
             name = f"{at.strftime('%Y%m%dT%H%M%SZ')}_{source}.jpg"
             _atomic_write(self.dir / name, small)
-            row = self.cycle.observe(at, crop, busy=bool(context.get("busy")))
+            row = self.cycle.observe(at, crop, busy=bool(context.get("busy")),
+                                     person=bool(context.get("person")))  # fmt: skip
             meta = {"at": at.isoformat(), "file": name, "source": source, "bytes": len(small),
                     "context": context, "state": row["state"], "why": row["why"],
                     "features": row["features"], "vs_in_use": row["vs_in_use"]}  # fmt: skip
