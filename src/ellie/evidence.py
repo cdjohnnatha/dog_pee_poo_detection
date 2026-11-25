@@ -83,6 +83,10 @@ class Evidence:
             if (src / name).is_file():
                 self.write(dest / name, (src / name).read_bytes())
                 files.append(name)
+        burst = src / "burst"  # her posture during the visit (ADR-0031): the posture dataset
+        for path in sorted(burst.glob("d_*.jpg")) + sorted(burst.glob("burst.json")):
+            self.write(dest / "burst" / path.name, path.read_bytes())
+            files.append(f"burst/{path.name}")
         stamp = (now or datetime.now(UTC)).astimezone(UTC)
         record = {
             "visit_id": visit_id,
