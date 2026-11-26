@@ -11,10 +11,12 @@ from ellie.watch import (
     PAD_BLOCK_MIN,
     PAD_BOX,
     PENDING_TTL_S,
+    SCENE_CTRL_MIN,
     PadWatch,
     _normalise,
     _pixels,
     floor_blob,
+    is_infrared,
     pad_dark_block,
 )
 
@@ -385,11 +387,13 @@ def test_a_floor_candidate_that_leaves_nothing_on_the_pad_is_still_dropped() -> 
 
 
 def moved_mat(jpeg: bytes) -> bytes:
-    """A light object moved on the floor beside the pad: the floor changes, the light does not."""
+    """A light object moved on the floor beside the pad: the floor changes, the light does not.
+
+    Sized like the real bath mat of 2026-11-18 11:59 (floor step 0.26, under SCENE_CTRL_MIN)."""
     img = Image.open(io.BytesIO(jpeg))
     px = img.load()
-    for y in range(140, 195):
-        for x in range(5, 45):
+    for y in range(165, 195):
+        for x in range(5, 30):
             px[x, y] = 250
     out = io.BytesIO()
     img.save(out, format="JPEG", quality=90)
@@ -436,3 +440,65 @@ def test_a_visit_forgets_the_held_frame() -> None:
     minute(w, clock, moved_mat(frame(pad=60)))
     w.rebase(moved_mat(frame(pad=60)))
     assert w._held is None
+
+
+# --- ADR-0032: the camera switching colour <-> infrared is a light change ---
+
+
+def colour(jpeg: bytes, tint: tuple[int, int, int] = (40, 10, -30)) -> bytes:
+    """The same scene in colour: warm floor, same grey levels on average (auto exposure)."""
+    grey = Image.open(io.BytesIO(jpeg)).convert("L")
+    r, g, b = (grey.point(lambda v, d=d: max(0, min(255, v + d))) for d in tint)
+    out = io.BytesIO()
+    Image.merge("RGB", (r, g, b)).save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+def test_infrared_and_colour_frames_are_told_apart() -> None:
+    assert is_infrared(frame()) is True
+    assert is_infrared(colour(frame())) is False
+    assert is_infrared(b"not a jpeg") is None
+
+
+def test_a_switch_from_colour_to_infrared_is_not_a_pee(tmp_path) -> None:
+    """2026-11-26 19:46: lamp off, the camera went infrared, brightness hardly moved."""
+    w, clock = watch(tmp_path)
+    w.observe(colour(frame()))
+    minute(w, clock, colour(frame()))
+    switched = moved_mat(frame(pad=60))  # the infrared pad renders darker, the floor differs
+    assert minute(w, clock, switched) is None
+    assert w.last_row["light_jump"]
+    assert w._held is None and w._pending is None
+    for _ in range(3):
+        assert minute(w, clock, switched) is None
+    assert w.confirmed_total == 0
+
+
+def test_a_held_frame_from_another_camera_mode_is_forgotten() -> None:
+    w, clock = watch()
+    w.observe(colour(frame()))
+    w._held = (w._prev[0], w._prev[1], w._prev[2], w._prev[3], clock.now)
+    assert minute(w, clock, frame(pad=60)) is None
+    assert w._held is None and w.confirmed_total == 0
+
+
+def reexposed(size: int = 200) -> bytes:
+    """Same light level, but every floor tile renders differently (infrared re-exposure)."""
+    img = Image.new("L", (size, size))
+    px = img.load()
+    for y in range(size):
+        for x in range(size):
+            px[x, y] = 120 + ((x // 3) * 11 + (y // 3) * 5 + 3) % 6 * 8
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=90)
+    return out.getvalue()
+
+
+def test_the_whole_floor_changing_at_once_is_light() -> None:
+    """2026-11-26 19:12: infrared re-exposed the scene, floor step 1.03, brightness +4."""
+    w, clock = watch()
+    w.observe(frame())
+    minute(w, clock, frame())
+    assert minute(w, clock, reexposed()) is None
+    assert w.last_row["ctrl_step"] >= SCENE_CTRL_MIN and w.last_row["light_jump"]
+    assert w._held is None and w._pending is None

@@ -66,6 +66,15 @@ POOP_GONE_FRAMES = 2
 # light). The frame before is HELD; once the floor is quiet again the pad is compared with it, and
 # a new dark patch there (PAD_BLOCK_MIN) is a confirmed change (ADR-0022). Given up after this:
 HOLD_TTL_S = 900
+# The camera switching between colour and infrared (a lamp on or off) re-exposes the whole scene,
+# so the mean grey level barely moves (2026-11-26 19:12 and 19:46: 130 -> 134, 133 -> 140) and
+# LIGHT_JUMP misses it. The floor then changes everywhere and the held frame above compared the
+# pad across two camera modes: a "new dark patch" and a pee question each time (also the owner's
+# no_pee relabels of 2026-11-18 17:51 and 18:42). A change of camera mode, or the whole floor
+# changing this much in one minute, is a light change like LIGHT_JUMP (ADR-0032). The bath mat of
+# 2026-11-18 11:59 moved the floor by 0.26, a person at the tray 0.1-0.6, the mode switches 1.0-1.2.
+SCENE_CTRL_MIN = 0.8
+IR_SATURATION_MAX = 8.0  # mean HSV saturation (0-255) of an infrared frame: they measure 0
 CSV_HEADER = "at,pad_step,ctrl_step,brightness,light_jump,candidate,confirmed,floor_peak,kind\n"
 
 
@@ -99,6 +108,28 @@ def _pixels(jpeg: bytes) -> list[float]:
         raise ValueError(f"not a valid image: {exc!r}") from exc
     flat = img.get_flattened_data() if hasattr(img, "get_flattened_data") else img.getdata()
     return [float(p) for p in flat]
+
+
+def is_infrared(jpeg: bytes) -> bool | None:
+    """True for a black-and-white (infrared) frame, False for colour, None when unreadable."""
+    try:
+        img = Image.open(io.BytesIO(jpeg))
+        if img.mode in ("L", "1"):
+            return True
+        img.draft("RGB", (SIZE * 2, SIZE * 2))
+        hsv = img.convert("RGB").resize((SIZE, SIZE)).convert("HSV")
+    except (UnidentifiedImageError, OSError):
+        return None
+    sat = hsv.getchannel("S")
+    flat = sat.get_flattened_data() if hasattr(sat, "get_flattened_data") else sat.getdata()
+    values = list(flat)
+    return sum(values) / len(values) <= IR_SATURATION_MAX
+
+
+def _mode_changed(a: bytes, b: bytes) -> bool:
+    """The two frames were taken in different camera modes (colour vs infrared)."""
+    ma, mb = is_infrared(a), is_infrared(b)
+    return ma is not None and mb is not None and ma != mb
 
 
 def _regions() -> tuple[list[int], list[int]]:
@@ -404,7 +435,10 @@ class PadWatch:
         norm = _normalise(px)
         confirmed: Candidate | None = None
         if self._poops:
-            jump_now = self._prev is not None and abs(brightness - self._prev[1]) >= LIGHT_JUMP
+            jump_now = self._prev is not None and (
+                abs(brightness - self._prev[1]) >= LIGHT_JUMP
+                or _mode_changed(self._prev[2], crop_jpeg)
+            )
             self._follow_poops(norm, jump_now)
         if self._pending is not None:
             confirmed = self._resolve_pending(norm, brightness, now, crop_jpeg)
@@ -414,7 +448,13 @@ class PadWatch:
             prev_norm, prev_brightness, prev_jpeg, prev_at = self._prev
             pad_step = _mean_abs(norm, prev_norm, _PAD)
             ctrl_step = _mean_abs(norm, prev_norm, _CONTROL)
-            jump = abs(brightness - prev_brightness) >= LIGHT_JUMP
+            # a light change: the brightness jumped, the camera switched colour/infrared, or the
+            # whole floor changed at once (SCENE_CTRL_MIN, ADR-0032)
+            jump = (
+                abs(brightness - prev_brightness) >= LIGHT_JUMP
+                or ctrl_step >= SCENE_CTRL_MIN
+                or _mode_changed(prev_jpeg, crop_jpeg)
+            )
             candidate = (
                 not jump
                 and pad_step >= STEP_MIN
@@ -499,7 +539,8 @@ class PadWatch:
         if ctrl_step > CTRL_MAX:
             return None  # still moving: wait
         self._held = None
-        if abs(brightness - held_brightness) >= LIGHT_JUMP:
+        if abs(brightness - held_brightness) >= LIGHT_JUMP or _mode_changed(held_jpeg, crop_jpeg):
+            log.info("watch: the light changed since the held frame, forgotten")
             return None
         dark = pad_dark_block(held_norm, norm)
         if dark < PAD_BLOCK_MIN:
@@ -542,6 +583,8 @@ class PadWatch:
         pending, row = self._pending, self._pending_row
         assert pending is not None and row is not None
         pending.seen += 1
+        if _mode_changed(pending.before_jpeg, crop_jpeg):
+            return self._expire_pending(pending, row, now)  # another camera mode: not comparable
         if pending.kind == "floor" and pending.before_norm is not None:
             # the blob is still there (darker than before the candidate) and the floor is as in
             # the candidate frame
@@ -567,7 +610,6 @@ class PadWatch:
                 # her, no later frame matched it): judge this clear frame instead
                 pending.after_jpeg, pending.lasting, same = crop_jpeg, True, True
                 row["kind"] = "pad_lasting"
-        expired = now - pending.at > timedelta(seconds=PENDING_TTL_S)
         if same:
             row["confirmed"] = True
             self._write(row)
@@ -575,11 +617,13 @@ class PadWatch:
             self.confirmed_total += 1
             log.info("watch: %s change confirmed, Frigate did not report it", pending.kind)
             return pending
-        if expired:
+        return self._expire_pending(pending, row, now)
+
+    def _expire_pending(self, pending: Candidate, row: dict, now: datetime) -> None:
+        if now - pending.at > timedelta(seconds=PENDING_TTL_S):
             self._write(row)  # given up: confirmed stays False
             self._pending = self._pending_row = None
             log.info("watch: candidate not confirmed, dropped")
-        return None
 
     @staticmethod
     def _darker_pad(pending: Candidate, norm: list[float]) -> bool:
