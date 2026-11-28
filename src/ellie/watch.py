@@ -328,6 +328,35 @@ def pee_stain(before_jpeg: bytes, after_jpeg: bytes) -> float | None:
     return round(area, 3) if area >= PEE_AREA_MIN and floor <= PEE_FLOOR_MAX else None
 
 
+def _darkest_block(before: list[float], after: list[float]) -> tuple[float, int]:
+    """(darkening of the 2x2 block of cells that darkened the most, its top-left cell)."""
+    dark = [max(0.0, b - a) for b, a in zip(before, after, strict=True)]
+    best, cell = -1.0, 0
+    for r in range(SIZE - 1):
+        for c in range(SIZE - 1):
+            i = r * SIZE + c
+            value = (dark[i] + dark[i + 1] + dark[i + SIZE] + dark[i + SIZE + 1]) / 4
+            if value > best:
+                best, cell = value, i
+    return best, cell
+
+
+def new_dark_peak(before_jpeg: bytes, after_jpeg: bytes) -> float | None:
+    """Darkening of the block that darkened the most between two visit frames (None: unreadable).
+
+    The same measure the watch follows a poop with. A new poop leaves a dark patch (counted poops
+    on a clean frame 1.14-4.79, 2026-11-13..28); the SAME poop still lying there when Ellie comes
+    back is already in BEFORE, so the frames barely differ there (0.35, 0.40, 1.02: the double
+    counts of 21/11 09:11, 25/11 09:10, 22/11 11:18; ADR-0033).
+    """
+    try:
+        before, after = _normalise(_pixels(before_jpeg)), _normalise(_pixels(after_jpeg))
+    except ValueError as exc:
+        log.warning("watch: cannot compare the visit frames: %s", exc)
+        return None
+    return round(_darkest_block(before, after)[0], 2)
+
+
 @dataclass
 class PoopTrack:
     """One counted poop the watch keeps an eye on, until it is gone."""
@@ -367,14 +396,7 @@ class PadWatch:
         except ValueError as exc:
             log.warning("watch: cannot track the poop of %s: %s", visit_id, exc)
             return False
-        dark = [max(0.0, b - a) for b, a in zip(before, after, strict=True)]
-        best, cell = -1.0, 0
-        for r in range(SIZE - 1):
-            for c in range(SIZE - 1):
-                i = r * SIZE + c
-                value = (dark[i] + dark[i + 1] + dark[i + SIZE] + dark[i + SIZE + 1]) / 4
-                if value > best:
-                    best, cell = value, i
+        best, cell = _darkest_block(before, after)
         if best < POOP_TRACK_MIN_PEAK:
             log.info("watch: poop of %s too faint to follow (peak %.2f)", visit_id, best)
             return False

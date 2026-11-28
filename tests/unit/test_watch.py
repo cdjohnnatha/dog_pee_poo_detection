@@ -17,6 +17,7 @@ from ellie.watch import (
     _pixels,
     floor_blob,
     is_infrared,
+    new_dark_peak,
     pad_dark_block,
 )
 
@@ -502,3 +503,11 @@ def test_the_whole_floor_changing_at_once_is_light() -> None:
     assert minute(w, clock, reexposed()) is None
     assert w.last_row["ctrl_step"] >= SCENE_CTRL_MIN and w.last_row["light_jump"]
     assert w._held is None and w._pending is None
+
+
+def test_new_dark_peak_is_high_for_a_new_blob_and_low_for_the_same_frame() -> None:
+    clean = frame()
+    poop = blob(clean)
+    assert new_dark_peak(clean, poop) >= 2.0
+    assert new_dark_peak(poop, poop) < 0.9  # the poop already lay there in BEFORE
+    assert new_dark_peak(b"not a jpeg", poop) is None

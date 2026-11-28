@@ -31,7 +31,7 @@ from ellie.small_person import SmallPersonFilter
 from ellie.state import build_state, local_text
 from ellie.store import Store
 from ellie.visits import Action, VisitTracker, iso
-from ellie.watch import Candidate, PadWatch, floor_blob, pee_stain
+from ellie.watch import Candidate, PadWatch, floor_blob, new_dark_peak, pee_stain
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +60,12 @@ FOUND_MATCH = timedelta(hours=6)  # a manual pee takes over a found pee of the s
 CAMERA_ALERT_AFTER = timedelta(minutes=15)  # go2rtc failing this long: tell the owner
 ALERT_EVERY_S = 6 * 3600
 POOP_PRESENT_TIMEOUT_H = 12  # a counted poop nobody cleared stops being "present" after this
+# A poop answer while an earlier counted poop still lies at the same place (ADR-0033): below
+# SAME_POOP_MAX of new darkening between BEFORE and AFTER it is that same poop (not counted); up to
+# SAME_POOP_ASK the owner is asked; above, a new poop. Counted poops on a clean frame 1.14-4.79,
+# the double counts of 21/11, 22/11, 25/11 at 0.40, 1.02, 0.35.
+SAME_POOP_MAX = 0.9
+SAME_POOP_ASK = 2.0
 FLOOR_PRESENT_TIMEOUT_H = 12  # a pee on the floor nobody cleaned stops being "present" (it dried)
 FLOOR_MARK_WINDOW = timedelta(hours=12)  # "Ela fez xixi no chão" marks the last pee this recent
 POOP_TRACK_LOOKBACK_DAYS = 2  # after a restart, open poops this recent are followed again
@@ -923,6 +929,34 @@ class Service(PadsMixin):
                  "asking the owner", visit_id, peak)  # fmt: skip
         return {"auto_poop": "uncertain", "final_poop": None}
 
+    def _same_poop(
+        self, visit: dict, where: str, before_path, after_path
+    ) -> tuple[dict, str | None]:
+        """A poop answer while an earlier poop is still uncleared at the same place (ADR-0033).
+
+        2026-11-22 11:18: the 11:05 poop was still on the pad, Gemini answered "poop" again
+        ("as fezes continuam iguais") and it was counted twice. That poop is already in BEFORE,
+        so only a new dark patch between BEFORE and AFTER makes a second one.
+        """
+        earlier = [
+            p for p in self.store.open_poops()
+            if p["id"] != visit["id"] and p["started_at"] < visit["started_at"]
+            and self._poop_where(p) in (None, where)
+        ]  # fmt: skip
+        if not earlier:
+            return {}, None
+        peak = new_dark_peak(before_path.read_bytes(), after_path.read_bytes())
+        if peak is None or peak >= SAME_POOP_ASK:
+            return {}, None
+        hhmm = (local_text(earlier[0]["started_at"]) or "")[11:16]
+        if peak < SAME_POOP_MAX:
+            log.info("visit %s: the poop of %s is still there and nothing new darkened "
+                     "(peak %.2f): the same poop, not counted", visit["id"], earlier[0]["id"], peak)  # fmt: skip
+            return {"final_poop": "no_poop"}, f"o mesmo cocô das {hhmm}, ainda não limpo"
+        log.info("visit %s: the poop of %s is still there and the change is small (peak %.2f), "
+                 "asking the owner", visit["id"], earlier[0]["id"], peak)  # fmt: skip
+        return {"auto_poop": "uncertain", "final_poop": None}, f"talvez o mesmo cocô das {hhmm}"
+
     @staticmethod
     def _before_at(visit: dict) -> datetime:
         """When the visit's BEFORE frame was taken."""
@@ -1348,6 +1382,11 @@ class Service(PadsMixin):
             fields |= self._poop_fields(result) | {"poop_cleared_at": None, "poop_cleared_by": None}
             if fields["auto_poop"] == "no_poop":
                 fields |= self._second_poop_opinion(visit_id, before_path, after_path)
+            elif fields["final_poop"] == "poop":
+                same, note = self._same_poop(visit_row, result.poop, before_path, after_path)
+                fields |= same
+                if note:
+                    fields["reason"] = f"{fields['reason']} ({note})"
         if not self.store.labels_for(visit_id):  # an owner's answer always wins
             fields |= {
                 "state": "DECIDED",

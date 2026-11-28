@@ -308,3 +308,64 @@ async def test_a_blob_gemini_missed_asks_the_owner(tmp_path, clock):
     asked = [b for b in topics(rig, "ellie/review/request") if b.get("kind") == "poop"]
     assert asked and asked[0]["visit_id"] == visit["id"]
     rig.store.close()
+
+
+# --- the same poop seen again before anybody cleared it (ADR-0033) ---
+
+
+async def test_the_same_poop_seen_again_is_not_counted_twice(rig):
+    """2026-11-22 11:18: the 11:05 poop still lay there and Gemini answered "poop" again."""
+    first = await poop_visit(rig)
+    rig.clock.advance(600)
+    await one_visit(rig)  # BEFORE is now the frame with the poop, AFTER the same
+    second = next(v for v in visits(rig) if v["id"] != first["id"])
+    assert second["auto_poop"] == "poop" and second["final_poop"] == "no_poop"
+    assert "o mesmo cocô das" in second["reason"]
+    state = last_state(rig)
+    assert state["poop_today"] == 1 and state["poop_present"]["visit_id"] == first["id"]
+    assert rig.service.watch.tracked_poops() == [first["id"]]
+
+
+async def test_a_small_change_at_a_present_poop_asks_the_owner(rig, monkeypatch):
+    first = await poop_visit(rig)
+    monkeypatch.setattr("ellie.service.new_dark_peak", lambda before, after: 1.5)
+    rig.clock.advance(600)
+    await one_visit(rig)
+    second = next(v for v in visits(rig) if v["id"] != first["id"])
+    assert second["auto_poop"] == "uncertain" and second["final_poop"] is None
+    assert "talvez o mesmo cocô das" in second["reason"]
+    asked = [b for b in topics(rig, "ellie/review/request") if b.get("kind") == "poop"]
+    assert [b["visit_id"] for b in asked] == [second["id"]]
+    assert last_state(rig)["poop_today"] == 1
+
+
+async def test_a_new_dark_patch_is_a_second_poop(rig, monkeypatch):
+    first = await poop_visit(rig)
+    monkeypatch.setattr("ellie.service.new_dark_peak", lambda before, after: 3.0)
+    rig.clock.advance(600)
+    await one_visit(rig)
+    second = next(v for v in visits(rig) if v["id"] != first["id"])
+    assert second["final_poop"] == "poop"
+    assert last_state(rig)["poop_today"] == 2
+
+
+async def test_a_poop_elsewhere_is_counted_even_if_one_is_present(rig, monkeypatch):
+    first = await poop_visit(rig)  # beside the tray
+    monkeypatch.setattr("ellie.service.new_dark_peak", lambda before, after: 0.1)
+    rig.analyser.script(
+        make_result(pee=False, pee_confidence=0.95, poop="on_pad", poop_confidence=0.95)
+    )
+    rig.clock.advance(600)
+    await one_visit(rig)
+    second = next(v for v in visits(rig) if v["id"] != first["id"])
+    assert second["final_poop"] == "poop" and last_state(rig)["poop_today"] == 2
+
+
+async def test_a_cleared_poop_does_not_hide_the_next_one(rig, monkeypatch):
+    first = await poop_visit(rig)
+    await command(rig, "poop_clear", visit_id=first["id"])
+    monkeypatch.setattr("ellie.service.new_dark_peak", lambda before, after: 0.1)
+    rig.clock.advance(600)
+    await one_visit(rig)
+    second = next(v for v in visits(rig) if v["id"] != first["id"])
+    assert second["final_poop"] == "poop" and last_state(rig)["poop_today"] == 2
